@@ -6,6 +6,20 @@ project aims to follow Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.1.1]
+
+### Fixed
+
+- `verify --manifest package.json`: dependencies that do not come from the npm
+  registry (local `file:` / `link:` / `portal:` paths, `git` and `http` URLs,
+  the `workspace:` and `catalog:` protocols, and `owner/repo` GitHub shorthands)
+  are no longer treated as package names. Previously they produced false
+  verdicts, including a false `MALICIOUS` when a local dependency's name
+  collided with a flagged registry package. `npm:` aliases now resolve to the
+  package that actually installs, so it is the one that gets checked.
+
+## [0.1.0]
+
 ### Changed
 
 - The installer is served from `dist.vulkro.com/install-live.sh`, matching the
