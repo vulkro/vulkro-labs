@@ -1,0 +1,39 @@
+[package]
+name = "vulkro-live"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT OR Apache-2.0"
+description = "Vulkro's free, keyless developer security tools. `verify` checks that an npm package an AI agent suggested is real, not malicious, and not suspiciously low-reputation, before it is installed."
+readme = "README.md"
+
+[[bin]]
+name = "vulkro-live"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+time = { workspace = true }
+toml = { workspace = true }
+vulkro-feeds = { path = "crates/vulkro-feeds" }
+
+[dev-dependencies]
+# The `testing` feature exposes vulkro-feeds' in-memory HTTP mock so the verify
+# tests run with no network.
+vulkro-feeds = { path = "crates/vulkro-feeds", features = ["testing"] }
+
+[workspace]
+members = ["crates/vulkro-feeds"]
+resolver = "2"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+time = { version = "0.3", features = ["parsing"] }
+toml = "0.8"
+ureq = "2"

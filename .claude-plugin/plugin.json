@@ -1,0 +1,18 @@
+{
+  "name": "vulkro-labs",
+  "version": "0.1.0",
+  "description": "Vulkro's free, keyless developer security tools: verify (the AI package bouncer) and warden (the MCP tool bouncer), plus one MCP server exposing both.",
+  "author": {
+    "name": "Vulkro",
+    "url": "https://vulkro.com"
+  },
+  "homepage": "https://vulkro.com",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["security", "supply-chain", "mcp", "slopsquatting", "npm", "pypi", "crates"],
+  "mcpServers": {
+    "vulkro-live": {
+      "command": "vulkro-live",
+      "args": ["mcp"]
+    }
+  }
+}
