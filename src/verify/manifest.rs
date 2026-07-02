@@ -54,11 +54,20 @@ fn infer_ecosystem(path: &Path) -> Result<Ecosystem> {
 // --- npm: package.json --------------------------------------------------------
 
 /// Parse all dependency names from `package.json` text.
+///
+/// Skips dependencies whose version specifier does not point at the public npm
+/// registry (local `file:`/`link:`/`portal:` paths, `git`/`http` URLs,
+/// `workspace:`/`catalog:` protocols, and `owner/repo` GitHub shorthands), and
+/// resolves `npm:<target>@<range>` aliases to the target package. Reporting a
+/// local or git dependency by its key name would produce a false MISSING, or
+/// even a false MALICIOUS when the key collides with a real flagged package.
 pub fn parse_package_json(text: &str) -> Result<Vec<String>> {
     use serde::Deserialize;
     use std::collections::BTreeMap;
 
-    type Deps = BTreeMap<String, serde::de::IgnoredAny>;
+    // Values are version specifiers; keep them as raw JSON so a malformed
+    // non-string value never fails the whole parse.
+    type Deps = BTreeMap<String, serde_json::Value>;
 
     #[derive(Deserialize)]
     struct Manifest {
@@ -81,9 +90,64 @@ pub fn parse_package_json(text: &str) -> Result<Vec<String>> {
         &manifest.optional_dependencies,
         &manifest.peer_dependencies,
     ] {
-        names.extend(block.keys().cloned());
+        for (name, spec) in block {
+            if let Some(resolved) = npm_registry_name(name, spec.as_str().unwrap_or("")) {
+                names.insert(resolved);
+            }
+        }
     }
     Ok(names.into_iter().collect())
+}
+
+/// The npm registry name to check for a `package.json` dependency, or `None`
+/// when the version spec points somewhere other than the public registry.
+fn npm_registry_name(name: &str, spec: &str) -> Option<String> {
+    let spec = spec.trim();
+
+    // `npm:<target>@<range>` alias: check what actually installs, not the key.
+    if let Some(target) = spec.strip_prefix("npm:") {
+        return npm_alias_target(target);
+    }
+
+    // Non-registry protocols: local paths, VCS, URLs, workspace / catalog.
+    const NON_REGISTRY: [&str; 12] = [
+        "file:", "link:", "portal:", "workspace:", "catalog:", "git:", "git+",
+        "github:", "gitlab:", "bitbucket:", "http:", "https:",
+    ];
+    if NON_REGISTRY.iter().any(|p| spec.starts_with(p)) {
+        return None;
+    }
+
+    // `owner/repo` (optionally `#ref`) GitHub shorthand: a semver range never
+    // contains a slash, so a slash means a shorthand, not a version.
+    if spec.contains('/') {
+        return None;
+    }
+
+    // Otherwise a semver range, dist-tag, or empty spec: the key is the name.
+    Some(name.to_string())
+}
+
+/// Resolve an `npm:` alias body (`<target>@<range>` or a bare `<target>`) to the
+/// target package name, preserving a leading `@scope/`.
+fn npm_alias_target(rest: &str) -> Option<String> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let name = if let Some(after) = rest.strip_prefix('@') {
+        // `@scope/name@range`: keep the scope, cut at the version `@`.
+        match after.find('@') {
+            Some(at) => format!("@{}", &after[..at]),
+            None => rest.to_string(),
+        }
+    } else {
+        match rest.find('@') {
+            Some(at) => rest[..at].to_string(),
+            None => rest.to_string(),
+        }
+    };
+    (!name.is_empty()).then_some(name)
 }
 
 // --- PyPI: requirements.txt and pyproject.toml -------------------------------
@@ -277,6 +341,35 @@ mod tests {
         assert_eq!(
             parse_package_json(text).unwrap(),
             vec!["express", "fsevents", "lodash", "react", "vitest"]
+        );
+    }
+
+    #[test]
+    fn package_json_skips_non_registry_specifiers() {
+        // Regression: local / git / url / workspace / catalog / shorthand deps
+        // are not registry packages and must not be reported (a `file:` key that
+        // collides with a flagged package name was a false MALICIOUS). `npm:`
+        // aliases resolve to the target that actually installs.
+        let text = r#"{
+            "dependencies": {
+                "express": "^4.18.2",
+                "@babel/core": "^7.0.0",
+                "local-dep": "file:../local",
+                "git-dep": "git+https://github.com/foo/bar.git",
+                "url-dep": "https://example.com/x.tgz",
+                "workspace-dep": "workspace:*",
+                "catalog-dep": "catalog:",
+                "shorthand": "expressjs/express#1.2.3",
+                "aliased": "npm:string-width@4",
+                "scoped-alias": "npm:@scope/real@1.0"
+            },
+            "devDependencies": {
+                "gh-short": "github:user/repo"
+            }
+        }"#;
+        assert_eq!(
+            parse_package_json(text).unwrap(),
+            vec!["@babel/core", "@scope/real", "express", "string-width"]
         );
     }
 
