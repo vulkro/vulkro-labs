@@ -1,0 +1,25 @@
+[package]
+name = "vulkro-feeds"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT OR Apache-2.0"
+description = "Keyless, commodity clients for public package and security feeds (npm, OSV) used by Vulkro's free developer tools. Self-contained, no vendor backend."
+readme = "README.md"
+keywords = ["npm", "osv", "supply-chain", "security", "malicious-packages"]
+categories = ["development-tools"]
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true, optional = true }
+
+[features]
+default = ["net"]
+# `net` provides the real (ureq) HTTP client. Disable it to consume the crate
+# with a caller-supplied transport only (e.g. the closed paid depth).
+net = ["dep:ureq"]
+# `testing` exposes an in-memory HTTP mock for downstream tests. It is also
+# available automatically inside this crate's own `cargo test`.
+testing = []

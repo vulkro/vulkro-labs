@@ -1,0 +1,23 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Release build artifacts (from scripts/build-release.sh)
+/dist
+
+# macOS
+.DS_Store
+
+# Editors
+/.idea
+/.vscode
+
+# Local Claude context and internal planning: NOT for the public repo.
+# These hold pricing, monetization, competitive, and research notes that
+# must never enter public git history. Kept on disk as working context only.
+# CLAUDE.md is kept local too: it references the private wiremap repo, the
+# closed engine's module layout, the funnel mechanic, and the roadmap, none
+# of which belong in the public history.
+/.claude/
+/planning/
+/CLAUDE.md

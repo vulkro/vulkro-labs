@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vulkro-live": {
+      "command": "vulkro-live",
+      "args": ["mcp"]
+    }
+  }
+}
