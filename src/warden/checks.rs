@@ -211,7 +211,7 @@ fn check_injection(tool: &McpTool, findings: &mut Vec<Finding>) {
                 category: "prompt-injection",
                 tool: Some(tool.name.clone()),
                 message: format!(
-                    "tool metadata contains an instruction-injection phrase: \"{phrase}\""
+                    "the text contains an instruction-injection phrase: \"{phrase}\""
                 ),
                 evidence: Some(snippet_around(&text, phrase)),
             });
@@ -223,7 +223,7 @@ fn check_injection(tool: &McpTool, findings: &mut Vec<Finding>) {
                 severity: Severity::Medium,
                 category: "tool-poisoning",
                 tool: Some(tool.name.clone()),
-                message: format!("tool metadata tries to steer the model: \"{phrase}\""),
+                message: format!("the text tries to steer the model: \"{phrase}\""),
                 evidence: Some(snippet_around(&text, phrase)),
             });
         }
@@ -242,7 +242,7 @@ fn check_hidden_unicode(tool: &McpTool, findings: &mut Vec<Finding>) {
             category: "hidden-unicode",
             tool: Some(tool.name.clone()),
             message: format!(
-                "tool metadata contains a hidden or invisible unicode character (U+{:04X})",
+                "the text contains a hidden or invisible unicode character (U+{:04X})",
                 c as u32
             ),
             evidence: None,
@@ -263,7 +263,7 @@ fn check_capabilities(tool: &McpTool, findings: &mut Vec<Finding>) {
             severity: Severity::Low,
             category: "capability",
             tool: Some(tool.name.clone()),
-            message: "tool describes powerful capabilities; confirm they are expected".to_string(),
+            message: "the text mentions powerful capabilities; confirm they are expected".to_string(),
             evidence: Some(matched.join(", ")),
         });
     }
@@ -338,7 +338,7 @@ fn check_ansi(tool: &McpTool, findings: &mut Vec<Finding>) {
             severity: Severity::High,
             category: "ansi-escape",
             tool: Some(tool.name.clone()),
-            message: "tool metadata contains a terminal escape sequence that can hide or \
+            message: "the text contains a terminal escape sequence that can hide or \
                       rewrite text"
                 .to_string(),
             evidence: None,
@@ -358,7 +358,7 @@ fn check_exfil(tool: &McpTool, findings: &mut Vec<Finding>) {
             severity: Severity::High,
             category: "exfil-sink",
             tool: Some(tool.name.clone()),
-            message: "tool metadata references a punycode (possible homograph) domain".to_string(),
+            message: "the text references a punycode (possible homograph) domain".to_string(),
             evidence: None,
         });
     }
@@ -367,7 +367,7 @@ fn check_exfil(tool: &McpTool, findings: &mut Vec<Finding>) {
             severity: Severity::Medium,
             category: "exfil-sink",
             tool: Some(tool.name.clone()),
-            message: "tool metadata embeds a markdown image pointing at an external URL (a \
+            message: "the text embeds a markdown image pointing at an external URL (a \
                       data-beacon pattern)"
                 .to_string(),
             evidence: Some(url),
@@ -378,7 +378,7 @@ fn check_exfil(tool: &McpTool, findings: &mut Vec<Finding>) {
             severity: Severity::Low,
             category: "encoded-blob",
             tool: Some(tool.name.clone()),
-            message: "tool metadata contains a long encoded (base64/hex) run".to_string(),
+            message: "the text contains a long encoded (base64/hex) run".to_string(),
             evidence: Some(run),
         });
     }

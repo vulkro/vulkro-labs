@@ -6,6 +6,15 @@ project aims to follow Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Fixed
+
+- warden findings now describe "the text" rather than "tool metadata", so the
+  wording is correct when the same engine scans a fetched page (`warden
+  --result`), an agent-card field (`cardcheck`), a memory record (`memcheck`),
+  or a skill's prose (`skillscan` / `audit`), not only an MCP tool manifest.
+
 ## [0.2.0]
 
 ### Added
