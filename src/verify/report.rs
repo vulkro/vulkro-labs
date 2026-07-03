@@ -35,6 +35,9 @@ pub struct PackageReport {
     /// Matching OSV `MAL-` advisory ids, if any.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub malicious_ids: Vec<String>,
+    /// Known CVE / GHSA advisory ids affecting the installed version, if any.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vulnerability_ids: Vec<String>,
 }
 
 impl PackageReport {
@@ -44,6 +47,15 @@ impl PackageReport {
             Some(version) => format!("{}@{}", self.name, version),
             None => self.name.clone(),
         }
+    }
+
+    /// Mark this report as cleared by the local trust store: force the verdict to
+    /// OK and record, visibly, that a human cleared this exact version (so the
+    /// clear is auditable rather than a silent pass).
+    pub fn cleared_by_trust(&mut self) {
+        let was = self.verdict.label();
+        self.verdict = Verdict::Ok;
+        self.reason = format!("trusted (cleared in .vulkro/trust.toml; was {was})");
     }
 }
 
@@ -91,25 +103,24 @@ pub fn summary_line(reports: &[PackageReport]) -> String {
     let mut ok = 0;
     let mut missing = 0;
     let mut malicious = 0;
+    let mut lookalike = 0;
+    let mut vulnerable = 0;
     let mut suspicious = 0;
     for report in reports {
         match report.verdict {
             Verdict::Ok => ok += 1,
             Verdict::Missing => missing += 1,
             Verdict::Malicious => malicious += 1,
+            Verdict::Lookalike => lookalike += 1,
+            Verdict::Vulnerable => vulnerable += 1,
             Verdict::Suspicious => suspicious += 1,
         }
     }
     format!(
-        "{total} checked: {ok} OK, {malicious} MALICIOUS, {missing} MISSING, {suspicious} SUSPICIOUS",
+        "{total} checked: {ok} OK, {malicious} MALICIOUS, {lookalike} LOOKALIKE, \
+         {vulnerable} VULNERABLE, {missing} MISSING, {suspicious} SUSPICIOUS",
         total = reports.len(),
     )
-}
-
-/// The funnel note: public-metadata checks here, deeper analysis in the paid
-/// offline scan. Message and pointer only, no paywall logic.
-pub fn funnel_note() -> &'static str {
-    "verify checks public package metadata. The full offline Vulkro scan adds deep dependency and code analysis. See https://vulkro.com"
 }
 
 #[cfg(test)]
@@ -127,6 +138,7 @@ mod tests {
             created: Some("2010-12-29T19:38:25.450Z".to_string()),
             downloads: Some(50_000_000),
             malicious_ids: Vec::new(),
+            vulnerability_ids: Vec::new(),
         }
     }
 
@@ -157,7 +169,7 @@ mod tests {
         let line = summary_line(&[sample()]);
         assert_eq!(
             line,
-            "1 checked: 1 OK, 0 MALICIOUS, 0 MISSING, 0 SUSPICIOUS"
+            "1 checked: 1 OK, 0 MALICIOUS, 0 LOOKALIKE, 0 VULNERABLE, 0 MISSING, 0 SUSPICIOUS"
         );
     }
 }

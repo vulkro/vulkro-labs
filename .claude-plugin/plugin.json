@@ -1,18 +1,28 @@
 {
   "name": "vulkro-labs",
-  "version": "0.1.0",
-  "description": "Vulkro's free, keyless developer security tools: verify (the AI package bouncer) and warden (the MCP tool bouncer), plus one MCP server exposing both.",
+  "version": "0.3.0",
+  "description": "Vulkro's free, keyless developer security tools: verify (the AI package bouncer), foresee (predictive slopsquat map), warden (the MCP tool + content bouncer), inspect (is this MCP server safe to add?), audit (audit your whole agent surface, now with config-secret and dangerous-setting checks), skillscan (scan the scripts your skills run), memcheck (scan your agent's memory for poisoning), trustdb (clear an artifact once and trust that exact version), lock/drift (catch an MCP rug pull), and cardcheck (vet an A2A agent card), with unified SARIF output for CI, plus one MCP server exposing them and delegating deep repo scans to the Vulkro engine.",
   "author": {
     "name": "Vulkro",
     "url": "https://vulkro.com"
   },
   "homepage": "https://vulkro.com",
   "license": "MIT OR Apache-2.0",
-  "keywords": ["security", "supply-chain", "mcp", "slopsquatting", "npm", "pypi", "crates"],
+  "keywords": [
+    "security",
+    "supply-chain",
+    "mcp",
+    "slopsquatting",
+    "npm",
+    "pypi",
+    "crates"
+  ],
   "mcpServers": {
     "vulkro-live": {
       "command": "vulkro-live",
-      "args": ["mcp"]
+      "args": [
+        "mcp"
+      ]
     }
   }
 }

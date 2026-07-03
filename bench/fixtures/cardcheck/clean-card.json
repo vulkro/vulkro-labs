@@ -1,0 +1,10 @@
+{
+  "name": "weather-bot",
+  "description": "Returns weather forecasts for a location.",
+  "url": "https://weather.example.com",
+  "provider": { "organization": "Acme Weather" },
+  "skills": [
+    { "name": "forecast", "description": "Return the forecast for a city.", "tags": ["weather"] }
+  ],
+  "signatures": [ { "protected": "eyJhbGciOiJFUzI1NiJ9", "signature": "c2lnbmF0dXJl" } ]
+}

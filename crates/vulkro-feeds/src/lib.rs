@@ -27,7 +27,7 @@ pub use ecosystem::{Ecosystem, PackageMetadata, Reputation};
 pub use http::{CachingHttpClient, HttpClient, HttpResponse};
 pub use mcp_manifest::{parse_tools, McpTool};
 pub use npm::Npm;
-pub use osv::{MaliciousReport, Osv};
+pub use osv::{Advisory, AdvisoryReport, MaliciousReport, Osv};
 pub use pypi::PyPi;
 
 #[cfg(feature = "net")]

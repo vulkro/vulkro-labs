@@ -17,16 +17,48 @@ never leaves your machine.
 
 - **verify** - the AI package bouncer. The moment your AI agent suggests or
   installs a dependency, `verify` confirms it exists (not hallucinated or
-  "slopsquatted"), is not known-malicious, and is not suspiciously new or
-  low-reputation, before it lands in your project. Covers **npm, PyPI, and
-  crates.io**.
+  "slopsquatted"), is not known-malicious, is not a look-alike typosquat of a
+  popular package, has no known CVE in the installed version, and is not
+  suspiciously new or low-reputation, before it lands in your project. Covers
+  **npm, PyPI, and crates.io**.
+- **foresee** - the predictive slopsquat map. Reads your project's real
+  dependency stack, enumerates the plausible-but-absent names an LLM is likely
+  to invent for a project like this, and checks the registry: a predicted name
+  already registered as a fresh, low-reputation squat is a trap lying in wait.
+  Writes a committable do-not-install guardrail.
 - **warden** - the MCP / agent-tool bouncer. Before your agent trusts a
-  third-party MCP server, `warden` scans its tool metadata for
-  prompt-injection, tool-poisoning, tool-shadowing, hidden unicode,
+  third-party MCP server, `warden` scans its tool metadata (or a returned tool
+  result) for prompt-injection, tool-poisoning, tool-shadowing, cross-tool
+  triggers, hidden unicode, ANSI-escape tricks, exfiltration sinks,
   sensitive-data parameters, and risky capabilities.
+- **inspect** - the "is this MCP server safe to add?" check. Resolves an MCP
+  server spec (an npm / PyPI package, a `npx`/`uvx` command), verifies the
+  backing package, and gives a GREEN / REVIEW / AVOID verdict before you add it.
+- **audit** - audits your whole agent surface at once: every configured MCP
+  server, plus the rules, skills, and instruction files an agent reads, plus
+  network-reaching hooks.
+- **skillscan** - scans the executable BODY of your skills, slash commands, and
+  subagents, not just their prose: it opens the scripts a skill bundles and
+  flags stealer tells the description hides.
+- **memcheck** - scans an AI agent's stored long-term memory for poisoning: an
+  injected "fact" that carries a runnable command or steers every future
+  session (OWASP Agentic Top 10 2026, ASI06).
+- **trustdb** - clear an artifact once (a package version, an MCP manifest, a
+  skill, a memory) into a committable `.vulkro/trust.toml`, and every tool trusts
+  that exact version or content, going loud again the moment it mutates.
+- **lock** / **drift** - catch an MCP rug pull: `lock` fingerprints the current
+  tool manifest into a committable `.vulkro/mcp.lock`, and `drift` reports a
+  field-level diff (a tool that dropped readOnlyHint, a description that gained
+  an injection phrase, an added or removed tool).
+- **cardcheck** - vet an A2A (Agent2Agent) agent card before your agent trusts a
+  peer: identity / domain match, injection over every text field, confusable
+  names, and an honest signature-presence report (it does not cryptographically
+  verify signatures and never claims to).
 
-Both are subcommands of one binary, and both are exposed to AI agents by a
-single built-in MCP server (`vulkro-live mcp`).
+All are subcommands of one binary, and the core ones are exposed to AI agents by
+a single built-in MCP server (`vulkro-live mcp`). Every finding-producing command
+supports `--format text|json|sarif`; the SARIF output is ready for CI
+code-scanning (GitHub, etc.).
 
 ## Install
 
@@ -58,16 +90,79 @@ or `Cargo.toml` (the ecosystem is inferred from the file name):
 vulkro-live verify express left-pad@1.3.0
 vulkro-live verify --ecosystem pypi requests flask
 vulkro-live verify --manifest ./Cargo.toml
-vulkro-live verify --json express some-fake-pkg
+vulkro-live verify --format json express some-fake-pkg
 ```
 
-Scan an MCP server's tool manifest (a `tools/list` result saved as JSON):
+Map the slopsquat traps already planted for your project, and write a
+do-not-install guardrail:
+
+```
+vulkro-live foresee
+```
+
+Scan an MCP server's tool manifest (a `tools/list` result saved as JSON), or a
+tool result the agent got back (`--result`, or `-` for stdin):
 
 ```
 vulkro-live warden ./tools.json
+vulkro-live warden --result ./tool-output.txt
 ```
 
-Run the MCP server over stdio so an agent can call both tools:
+Decide whether an MCP server is safe to add before you add it:
+
+```
+vulkro-live inspect "npx -y @acme/mcp-server"
+```
+
+Audit your whole agent surface (MCP servers, rules, skills, hooks) at once:
+
+```
+vulkro-live audit
+```
+
+Scan the scripts your skills, commands, and subagents actually run, and the
+memory your agent has stored:
+
+```
+vulkro-live skillscan
+vulkro-live memcheck
+```
+
+Clear an artifact once so every tool trusts that exact version or content (and
+re-flags it the moment it changes):
+
+```
+vulkro-live trustdb add express@4.18.2
+vulkro-live trustdb add --manifest ./tools.json
+vulkro-live trustdb list
+```
+
+Catch an MCP rug pull: record the current tool manifest, then detect drift after
+you re-capture it:
+
+```
+vulkro-live lock ./tools.json
+vulkro-live drift ./tools.json
+```
+
+Vet an A2A agent card before trusting a peer agent (or `--file` for a local
+card):
+
+```
+vulkro-live cardcheck example.com
+vulkro-live cardcheck --file ./agent-card.json
+```
+
+Emit machine output for CI (SARIF is ready for GitHub code-scanning):
+
+```
+vulkro-live verify --manifest package.json --format sarif
+vulkro-live audit --format json
+vulkro-live audit --write-baseline .vulkro/audit-baseline.json
+vulkro-live audit --diff .vulkro/audit-baseline.json
+```
+
+Run the MCP server over stdio so an agent can call these tools:
 
 ```
 vulkro-live mcp
@@ -81,8 +176,10 @@ vulkro-live mcp
 | --- | --- |
 | `MISSING` | Not in the registry: a likely AI hallucination or slopsquat. |
 | `MALICIOUS` | Flagged by OSV (an OpenSSF malicious-packages record). |
+| `LOOKALIKE` | A homoglyph or one-edit typo of a very popular package (a likely typosquat). |
+| `VULNERABLE` | The installed version has a known CVE / advisory (from OSV). |
 | `SUSPICIOUS` | Exists, but very new or with very few downloads. |
-| `OK` | Real, not flagged, reasonable reputation. |
+| `OK` | Real, not flagged, no known advisory, reasonable reputation. |
 
 `warden` reports findings ranked by severity (HIGH, MEDIUM, LOW, INFO).
 

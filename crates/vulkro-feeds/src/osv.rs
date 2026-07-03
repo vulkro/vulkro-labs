@@ -24,6 +24,28 @@ pub struct MaliciousReport {
     pub summary: Option<String>,
 }
 
+/// One known (non-malicious) security advisory affecting the queried version: a
+/// CVE / GHSA / PYSEC / RUSTSEC record.
+#[derive(Debug, Clone)]
+pub struct Advisory {
+    /// The advisory id (e.g. `GHSA-...`, `CVE-...`).
+    pub id: String,
+    /// A human-readable summary, if any.
+    pub summary: Option<String>,
+    /// The severity label OSV reports (`CRITICAL` / `HIGH` / `MODERATE` /
+    /// `LOW`), uppercased, when present.
+    pub severity: Option<String>,
+}
+
+/// The full advisory picture for a package version from one OSV query: any
+/// malicious-package flag, plus the non-malicious vulnerabilities that affect
+/// the queried version. Both come from a single request.
+#[derive(Debug, Clone, Default)]
+pub struct AdvisoryReport {
+    pub malicious: Option<MaliciousReport>,
+    pub vulnerabilities: Vec<Advisory>,
+}
+
 #[derive(Deserialize)]
 struct QueryResponse {
     #[serde(default)]
@@ -35,6 +57,18 @@ struct Vuln {
     id: String,
     #[serde(default)]
     summary: Option<String>,
+    /// Present (a timestamp) when the advisory has been withdrawn; such records
+    /// are ignored.
+    #[serde(default)]
+    withdrawn: Option<String>,
+    #[serde(default)]
+    database_specific: Option<DatabaseSpecific>,
+}
+
+#[derive(Deserialize)]
+struct DatabaseSpecific {
+    #[serde(default)]
+    severity: Option<String>,
 }
 
 /// A keyless client for the OSV.dev query API.
@@ -61,6 +95,20 @@ impl<'a> Osv<'a> {
         name: &str,
         version: Option<&str>,
     ) -> Result<Option<MaliciousReport>> {
+        Ok(self.advisories(ecosystem, name, version)?.malicious)
+    }
+
+    /// Query OSV once and return both the malicious-package flag (if any) and
+    /// the non-malicious advisories (CVE / GHSA / ...) affecting the queried
+    /// version. When `version` is given, OSV matches advisory ranges against it
+    /// server-side, so the vulnerabilities reflect that exact version.
+    /// Withdrawn advisories are ignored.
+    pub fn advisories(
+        &self,
+        ecosystem: &str,
+        name: &str,
+        version: Option<&str>,
+    ) -> Result<AdvisoryReport> {
         let body = build_query(ecosystem, name, version);
         let resp = self
             .http
@@ -69,7 +117,7 @@ impl<'a> Osv<'a> {
         // OSV returns 200 with an empty `vulns` list for a clean package; a 404
         // (not expected here) is treated the same as "nothing found".
         if resp.status == 404 {
-            return Ok(None);
+            return Ok(AdvisoryReport::default());
         }
         if !resp.is_success() {
             anyhow::bail!(
@@ -80,21 +128,42 @@ impl<'a> Osv<'a> {
         let parsed: QueryResponse = serde_json::from_str(&resp.body)
             .with_context(|| format!("parsing the OSV response for '{name}'"))?;
 
-        let mut ids = Vec::new();
-        let mut summary = None;
+        let mut mal_ids = Vec::new();
+        let mut mal_summary = None;
+        let mut vulnerabilities = Vec::new();
         for vuln in parsed.vulns {
+            if vuln.withdrawn.is_some() {
+                continue;
+            }
             if vuln.id.starts_with(MALICIOUS_PREFIX) {
-                if summary.is_none() {
-                    summary = vuln.summary;
+                if mal_summary.is_none() {
+                    mal_summary = vuln.summary;
                 }
-                ids.push(vuln.id);
+                mal_ids.push(vuln.id);
+            } else {
+                let severity = vuln
+                    .database_specific
+                    .and_then(|d| d.severity)
+                    .map(|s| s.to_uppercase());
+                vulnerabilities.push(Advisory {
+                    id: vuln.id,
+                    summary: vuln.summary,
+                    severity,
+                });
             }
         }
-        if ids.is_empty() {
-            Ok(None)
+        let malicious = if mal_ids.is_empty() {
+            None
         } else {
-            Ok(Some(MaliciousReport { ids, summary }))
-        }
+            Some(MaliciousReport {
+                ids: mal_ids,
+                summary: mal_summary,
+            })
+        };
+        Ok(AdvisoryReport {
+            malicious,
+            vulnerabilities,
+        })
     }
 }
 
@@ -135,6 +204,23 @@ mod tests {
             .malicious("npm", "some-pkg", None)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn advisories_surfaces_cve_and_skips_withdrawn() {
+        let body = r#"{"vulns":[
+            {"id":"GHSA-aaaa","summary":"prototype pollution","database_specific":{"severity":"high"}},
+            {"id":"CVE-2020-0001","withdrawn":"2021-01-01T00:00:00Z"},
+            {"id":"MAL-2024-1","summary":"malware"}
+        ]}"#;
+        let http = MockHttp::new().on_post("api.osv.dev/v1/query", None, 200, body);
+        let report = Osv::new(&http)
+            .advisories("npm", "some-pkg", Some("1.0.0"))
+            .unwrap();
+        assert!(report.malicious.is_some());
+        assert_eq!(report.vulnerabilities.len(), 1);
+        assert_eq!(report.vulnerabilities[0].id, "GHSA-aaaa");
+        assert_eq!(report.vulnerabilities[0].severity.as_deref(), Some("HIGH"));
     }
 
     #[test]

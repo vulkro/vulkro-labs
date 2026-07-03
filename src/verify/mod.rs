@@ -6,6 +6,7 @@
 //! ecosystem-dispatched through `vulkro_feeds::registry`, so this policy code
 //! never branches per ecosystem.
 
+pub mod lookalike;
 pub mod manifest;
 pub mod report;
 pub mod verdict;
@@ -17,6 +18,22 @@ use vulkro_feeds::{registry, Ecosystem, HttpClient, Osv};
 
 use self::report::PackageReport;
 use self::verdict::{classify, Signals, Thresholds};
+use crate::trust::TrustStore;
+
+/// If the trust store has cleared this package's effective version (the pinned
+/// version, or the resolved latest), fold the clear into the report. Only an
+/// exact name@version pin clears; a name-only pin cannot exist by construction.
+pub fn apply_package_trust(report: &mut PackageReport, store: &TrustStore) {
+    let version = report
+        .version
+        .clone()
+        .or_else(|| report.latest_version.clone());
+    if let Some(version) = version {
+        if store.allows_package(report.ecosystem, &report.name, &version) {
+            report.cleared_by_trust();
+        }
+    }
+}
 
 /// A parsed package request: an ecosystem plus `name` or `name@version`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,25 +121,41 @@ impl<'a> Verifier<'a> {
         let eco = package.ecosystem;
         let core = registry::lookup(self.http, eco, &package.name)
             .with_context(|| format!("verifying '{}'", package.name))?;
-        let malicious = Osv::new(self.http)
-            .malicious(eco.osv_name(), &package.name, package.version.as_deref())
-            .with_context(|| format!("verifying '{}'", package.name))?;
 
         let exists = core.is_some();
+        let core_created = core.as_ref().and_then(|c| c.created.clone());
+        let core_latest = core.as_ref().and_then(|c| c.latest_version.clone());
+
+        // Query OSV for the version that would actually install (pinned, else
+        // latest) so CVE matching reflects that exact version, not old releases.
+        // One query returns both the malicious flag and the version's advisories.
+        let query_version = package.version.as_deref().or(core_latest.as_deref());
+        let advisories = Osv::new(self.http)
+            .advisories(eco.osv_name(), &package.name, query_version)
+            .with_context(|| format!("verifying '{}'", package.name))?;
+        let malicious = advisories.malicious;
+        let vulnerabilities = advisories.vulnerabilities;
+
+        // A name that mimics a very popular package is a likely typosquat. Only
+        // meaningful for a package that exists and is not already malicious.
+        let mimics = if exists && malicious.is_none() {
+            lookalike::detect(&package.name, eco)
+        } else {
+            None
+        };
+
         let requested_version_exists = match (&package.version, &core) {
             (Some(version), Some(core)) => Some(core.has_version(version)),
             _ => None,
         };
 
-        // Only fetch reputation when it could change the verdict, i.e. the
-        // package exists, is not malicious, and (if a version was asked for)
-        // that version is published. This spares an extra request for missing,
-        // malicious, or bad-version packages.
-        let need_reputation =
-            exists && malicious.is_none() && requested_version_exists != Some(false);
-
-        let core_created = core.as_ref().and_then(|c| c.created.clone());
-        let core_latest = core.as_ref().and_then(|c| c.latest_version.clone());
+        // Reputation only changes an otherwise-clean verdict, so skip the extra
+        // request when the package is missing, malicious, vulnerable, or the
+        // requested version is unpublished.
+        let need_reputation = exists
+            && malicious.is_none()
+            && vulnerabilities.is_empty()
+            && requested_version_exists != Some(false);
         let (created, latest_version, downloads) = if need_reputation {
             let rep = registry::reputation(self.http, eco, &package.name)
                 .with_context(|| format!("verifying '{}'", package.name))?;
@@ -139,6 +172,8 @@ impl<'a> Verifier<'a> {
             exists,
             requested_version_exists,
             malicious,
+            lookalike: mimics,
+            vulnerabilities,
             created,
             latest_version,
             downloads,
@@ -151,6 +186,7 @@ impl<'a> Verifier<'a> {
             created,
             downloads,
             malicious,
+            vulnerabilities,
             ..
         } = signals;
         Ok(PackageReport {
@@ -163,6 +199,7 @@ impl<'a> Verifier<'a> {
             created,
             downloads,
             malicious_ids: malicious.map(|m| m.ids).unwrap_or_default(),
+            vulnerability_ids: vulnerabilities.into_iter().map(|v| v.id).collect(),
         })
     }
 }
@@ -224,6 +261,41 @@ mod tests {
     }
 
     #[test]
+    fn trust_clears_only_the_exact_pinned_version() {
+        use crate::trust::TrustStore;
+        use std::path::Path;
+
+        // An empty store loaded from a path that does not exist.
+        let mut store = TrustStore::load(Path::new("/tmp/vulkro-verify-trust-xyz")).unwrap();
+        store.add_package(Ecosystem::Npm, "leftpad", "1.3.0", None);
+
+        let base = |version: &str, verdict: Verdict| PackageReport {
+            ecosystem: Ecosystem::Npm,
+            name: "leftpad".to_string(),
+            version: Some(version.to_string()),
+            verdict,
+            reason: "flagged".to_string(),
+            latest_version: None,
+            created: None,
+            downloads: None,
+            malicious_ids: Vec::new(),
+            vulnerability_ids: Vec::new(),
+        };
+
+        // The pinned version is cleared to OK, with a visible marker.
+        let mut cleared = base("1.3.0", Verdict::Suspicious);
+        apply_package_trust(&mut cleared, &store);
+        assert_eq!(cleared.verdict, Verdict::Ok);
+        assert!(cleared.reason.contains("trusted"));
+
+        // A DIFFERENT version of the same name is NOT auto-cleared, even a
+        // malicious one (the anti-silent-greenlight guarantee).
+        let mut other = base("1.4.0", Verdict::Malicious);
+        apply_package_trust(&mut other, &store);
+        assert_eq!(other.verdict, Verdict::Malicious);
+    }
+
+    #[test]
     fn npm_nonexistent_is_missing() {
         // Downloads is intentionally not stubbed: a missing package must not
         // trigger a reputation request (the mock errors on unstubbed calls).
@@ -253,6 +325,27 @@ mod tests {
             .unwrap();
         assert_eq!(report.verdict, Verdict::Malicious);
         assert_eq!(report.malicious_ids, vec!["MAL-2024-1095".to_string()]);
+    }
+
+    #[test]
+    fn known_cve_makes_a_healthy_package_vulnerable() {
+        // A real, popular package whose installed version has a GHSA advisory.
+        // No downloads stub: a vulnerable package must not fetch reputation.
+        let http = MockHttp::new()
+            .on_get("registry.npmjs.org", 200, NPM_OLD_POPULAR)
+            .on_post(
+                "api.osv.dev/v1/query",
+                None,
+                200,
+                r#"{"vulns":[{"id":"GHSA-jf85-cpcp-j695","summary":"prototype pollution","database_specific":{"severity":"High"}}]}"#,
+            );
+        let report = Verifier::new(&http)
+            .with_now(fixed_now())
+            .verify(&npm("lodash"))
+            .unwrap();
+        assert_eq!(report.verdict, Verdict::Vulnerable);
+        assert_eq!(report.vulnerability_ids, vec!["GHSA-jf85-cpcp-j695".to_string()]);
+        assert!(report.reason.contains("HIGH"));
     }
 
     #[test]
