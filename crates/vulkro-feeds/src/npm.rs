@@ -21,8 +21,10 @@ struct Packument {
     dist_tags: DistTags,
     #[serde(default)]
     versions: BTreeMap<String, serde::de::IgnoredAny>,
+    // Values are timestamp strings, EXCEPT the `unpublished` key, whose value is
+    // an object, so accept any JSON and read `created` only if it is a string.
     #[serde(default)]
-    time: BTreeMap<String, String>,
+    time: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -70,7 +72,11 @@ impl<'a> Npm<'a> {
         Ok(Some(PackageMetadata {
             name: name.to_string(),
             latest_version: doc.dist_tags.latest,
-            created: doc.time.get("created").cloned(),
+            created: doc
+                .time
+                .get("created")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             versions: doc.versions.into_keys().collect(),
         }))
     }
@@ -133,6 +139,25 @@ mod tests {
         assert_eq!(info.created.as_deref(), Some("2010-12-29T19:38:25.450Z"));
         assert!(info.has_version("4.18.2"));
         assert!(!info.has_version("99.0.0"));
+    }
+
+    #[test]
+    fn lookup_tolerates_unpublished_object_in_time() {
+        // Regression: packages with unpublished versions carry an `unpublished`
+        // key in `time` whose value is an object, not a timestamp string.
+        let body = r#"{
+            "dist-tags": {"latest": "1.2.1"},
+            "versions": {"1.2.1": {}},
+            "time": {
+                "created": "2019-11-29T07:26:39.818Z",
+                "1.2.1": "2019-12-05T03:53:32.935Z",
+                "unpublished": {"time": "2022-05-18T01:20:55.154Z", "versions": ["1.0.1"]}
+            }
+        }"#;
+        let http = MockHttp::new().on_get("registry.npmjs.org/express-helper", 200, body);
+        let info = Npm::new(&http).lookup("express-helper").unwrap().unwrap();
+        assert_eq!(info.created.as_deref(), Some("2019-11-29T07:26:39.818Z"));
+        assert_eq!(info.latest_version.as_deref(), Some("1.2.1"));
     }
 
     #[test]

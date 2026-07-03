@@ -27,6 +27,20 @@ pub fn scan_file(path: &Path) -> Result<Vec<Finding>> {
     scan_manifest_text(&text).with_context(|| format!("scanning {}", path.display()))
 }
 
+/// Scan a block of untrusted free text (a tool result, a fetched page, a file
+/// the agent read), attributing findings to `label`. Unlike [`scan_manifest_text`]
+/// this does not parse JSON: the input is treated as raw content.
+pub fn scan_content(text: &str, label: &str) -> Vec<Finding> {
+    checks::scan_text(text, label)
+}
+
+/// Scan a file's raw contents as untrusted free text (see [`scan_content`]).
+pub fn scan_result_file(path: &Path) -> Result<Vec<Finding>> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(checks::scan_text(&text, &path.display().to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

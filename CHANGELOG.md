@@ -6,6 +6,96 @@ project aims to follow Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.2.0]
+
+### Added
+
+- Unified machine output: a shared `--format text|json|sarif` flag on every
+  finding-producing command (verify, warden, inspect, audit, foresee, skillscan,
+  memcheck, drift), backed by one `src/sarif` mapping layer that emits SARIF
+  2.1.0 for CI code-scanning (GitHub, etc.). Rule ids use the reserved free
+  namespace `vulkro-live/<command>/<slug>` so they never collide with the paid
+  engine's `vulkro/...` ids. The old `--json` on verify and warden is kept as a
+  deprecated alias (a stderr warning; rule 11) for one release.
+- `vulkro-live trustdb` and `.vulkro/trust.toml` - clear an artifact once and
+  every free tool trusts that EXACT version or content, going loud again the
+  moment it mutates. `trustdb add` clears a package (name@version), an MCP tool
+  manifest (`--manifest`), a skill (`--skill`, covers SKILL.md plus its
+  scripts), or a memory file (`--memory`); `list` / `remove` / `clear` manage
+  the store. Trust is always version- or fingerprint-pinned, never name-only, so
+  a new (possibly bad) version is never auto-cleared. Fingerprints are a
+  hand-rolled FNV-1a over canonical content (no crypto dep). verify / inspect /
+  audit / warden / skillscan / memcheck / foresee consult the store and render a
+  visible "trusted (cleared in .vulkro/trust.toml)" marker, never a silent pass
+  (`src/trust`).
+- `vulkro-live lock` and `vulkro-live drift` - MCP-manifest rug-pull detection.
+  `lock` fingerprints the current manifest(s) into a committable, deterministic
+  `.vulkro/mcp.lock`; `drift` reports a field-level diff against it, classifying
+  each change by what it introduces (a readOnlyHint drop or a newly-injected
+  description is HIGH; an added/removed tool or a schema change is MEDIUM; a
+  benign reword is LOW). Reuses `parse_tools` and warden's engine; structural
+  canonical-JSON diff, no crypto dep (`src/lock`).
+- `vulkro-live cardcheck` - an A2A (Agent2Agent) agent-card bouncer. Fetches a
+  public `/.well-known/agent-card.json` (agent.json fallback), or reads a local
+  card with `--file` / stdin, and runs five keyless checks: identity / domain
+  match, prompt-injection over every text field (warden), confusable /
+  mixed-script names, capability over-reach, and provider trust. Signatures are
+  reported for PRESENCE and well-formedness ONLY: this version does not
+  cryptographically verify them and never claims it does (the type has no
+  "verified" state; a test asserts the output never says so). No crypto
+  dependency added (`src/cardcheck`).
+- `audit` hardening: config-file plaintext-secret detection (server env /
+  headers / args, via a hand-rolled prefix + Shannon-entropy classifier with a
+  tight allowlist), dangerous-settings detection (auto-approve / alwaysAllow,
+  permission-bypass modes, bypass flags, fetch-and-exec hooks), and
+  `--write-baseline` / `--diff <file>` for a committable surface snapshot and a
+  since-baseline delta (`src/audit/{secrets,settings,snapshot}.rs`).
+- `vulkro-live inspect <spec>` - the "is this MCP server safe to add?" check.
+  Resolves an MCP server spec (an npm / PyPI package, or a `npx`/`uvx` command),
+  verifies the backing package with the same feeds `verify` uses, and returns a
+  GREEN / REVIEW / AVOID verdict. Local scripts, git, and other unverifiable
+  specs return REVIEW rather than a false pass. Malformed input exits `2`.
+- `vulkro-live audit` - audits the whole agent surface at once: every configured
+  MCP server (verified via `inspect`), the rules / skills / instruction files an
+  agent reads (scanned with warden's engine), and network-reaching hooks. Dedups
+  by canonical path and by hook command.
+- `vulkro-live foresee` - the predictive slopsquat map. Reads a project's real
+  dependency stack, deterministically enumerates the plausible-but-absent names
+  an LLM is likely to invent for a project like this, and checks each against the
+  registry. A predicted name already registered as a fresh, low-reputation squat
+  is reported as a `TRAP`. Writes a committable `.vulkro-foresee.json`
+  do-not-install guardrail. Keyless and local.
+- `vulkro-live skillscan` - scans the executable BODY of Claude Code skills,
+  slash commands, and subagents, not just their prose. Parses each frontmatter
+  for dangerous declared powers (broad tool access, permission bypass) and
+  static-scans every bundled script for stealer tells: download-pipe-to-shell,
+  base64-decode-and-execute, reads of `~/.ssh` / `~/.aws` / `~/.claude.json` /
+  `.env`, environment dumps, and outbound network egress. GREEN / REVIEW / AVOID
+  per skill. It never executes anything.
+- `vulkro-live memcheck` - scans an AI agent's stored long-term memory for
+  poisoning (OWASP Agentic Top 10 2026, ASI06). Auto-discovers the common text
+  memory stores (MEMORY.md, memory/*.md, *.jsonl logs), runs warden's hardened
+  text engine over each record, and flags any memory that carries a runnable
+  command or steers the agent to act. Purely offline.
+- `verify` now also flags `LOOKALIKE` (a homoglyph or one-edit typosquat of a
+  very popular npm / PyPI / crates package) and `VULNERABLE` (the installed
+  version has a known CVE / advisory in OSV), in addition to MISSING, MALICIOUS,
+  SUSPICIOUS, and OK. The verdict ladder is MISSING > MALICIOUS > LOOKALIKE >
+  VULNERABLE > SUSPICIOUS > OK.
+- `warden --result <file>` (and `-` for stdin) scans a tool result the agent
+  received, not just a tool manifest, so injection delivered in returned content
+  is caught. New checks across both modes: ANSI-escape sequences, exfiltration
+  sinks (punycode, markdown-image URLs, long encoded runs), and manifest-level
+  cross-tool triggers ("always call X first").
+- The built-in MCP server advertises the agent-surface tools and delegates deep
+  repo scans to the Vulkro engine when it is on PATH.
+
+### Fixed
+
+- npm feed: a package whose registry `time` object carries an `unpublished` key
+  (an object, not a string) no longer fails to parse. This previously broke
+  `verify` for any package with unpublished versions.
+
 ## [0.1.1]
 
 ### Fixed

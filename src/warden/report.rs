@@ -57,10 +57,22 @@ pub fn any_actionable(findings: &[Finding]) -> bool {
     findings.iter().any(|f| f.severity.is_actionable())
 }
 
+/// A visible, non-actionable marker that an artifact was cleared via the local
+/// trust store, so a cleared artifact reads as "trusted", not a silent blank.
+pub fn trusted_finding() -> Finding {
+    Finding {
+        severity: Severity::Info,
+        category: "trusted",
+        tool: None,
+        message: "cleared in .vulkro/trust.toml".to_string(),
+        evidence: None,
+    }
+}
+
 /// Render an aligned text table, one row per finding, most severe first.
 pub fn render_human(findings: &[Finding]) -> String {
     if findings.is_empty() {
-        return "No issues found in the MCP tool manifest.\n".to_string();
+        return "No issues found.\n".to_string();
     }
     let tool_width = findings
         .iter()
@@ -109,10 +121,4 @@ pub fn summary_line(findings: &[Finding]) -> String {
         "{total} finding(s): {high} HIGH, {medium} MEDIUM, {low} LOW, {info} INFO",
         total = findings.len(),
     )
-}
-
-/// The funnel note: static heuristics here, deeper analysis in the paid scan.
-/// Message and pointer only, no paywall logic.
-pub fn funnel_note() -> &'static str {
-    "warden runs static, commodity heuristics on tool metadata. The full offline Vulkro scan adds deeper analysis. See https://vulkro.com"
 }
