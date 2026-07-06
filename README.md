@@ -20,7 +20,18 @@ never leaves your machine.
   "slopsquatted"), is not known-malicious, is not a look-alike typosquat of a
   popular package, has no known CVE in the installed version, and is not
   suspiciously new or low-reputation, before it lands in your project. Covers
-  **npm, PyPI, and crates.io**.
+  **npm, PyPI, and crates.io**. Pass `--lockfile` to vet a pinned lockfile
+  (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`,
+  `poetry.lock`, or a hashed `requirements.txt`): it verifies every locked
+  package and adds lockfile-integrity findings a plain manifest cannot show (a
+  resolved URL pointing off the official registry, a missing integrity hash).
+- **provenance** - the build-provenance presence bouncer. Reads what the public
+  registry advertises (npm `dist.attestations`, PyPI PEP 740 attestations) and
+  reports whether a package's build provenance is PRESENT and well-formed,
+  returning GREEN / REVIEW / AVOID. It is honest: it never cryptographically
+  verifies an attestation and never claims to. Covers **npm and PyPI**
+  (crates.io exposes no keyless provenance, so it is reported as "not
+  available").
 - **foresee** - the predictive slopsquat map. Reads your project's real
   dependency stack, enumerates the plausible-but-absent names an LLM is likely
   to invent for a project like this, and checks the registry: a predicted name
@@ -91,6 +102,24 @@ vulkro-live verify express left-pad@1.3.0
 vulkro-live verify --ecosystem pypi requests flask
 vulkro-live verify --manifest ./Cargo.toml
 vulkro-live verify --format json express some-fake-pkg
+```
+
+Vet a pinned lockfile (verify every locked package plus lockfile-integrity
+findings: an off-registry resolved URL, a missing integrity hash). The
+ecosystem is inferred from the file name:
+
+```
+vulkro-live verify --lockfile ./package-lock.json
+vulkro-live verify --lockfile ./Cargo.lock --format sarif
+```
+
+Check whether published packages carry build provenance / attestations (present
+and well-formed, never cryptographically verified):
+
+```
+vulkro-live provenance express @scope/pkg@1.2.3
+vulkro-live provenance --ecosystem pypi requests
+vulkro-live provenance --manifest ./package.json --format json
 ```
 
 Map the slopsquat traps already planted for your project, and write a
@@ -204,9 +233,11 @@ See [ATTRIBUTION.md](ATTRIBUTION.md) for per-source credits.
 
 ## Use it with an AI agent
 
-`vulkro-live mcp` is a Model Context Protocol server that exposes `verify` and
-`warden` as tools, so an agent can vet a package or an MCP server inline. Point
-your MCP client at it with the bundled config:
+`vulkro-live mcp` is a Model Context Protocol server that exposes the whole free
+bouncer suite as tools, so an agent can call any of them inline: `verify`,
+`verify_lockfile`, `provenance`, `warden`, `inspect`, `audit`, `foresee`,
+`skillscan`, `memcheck`, `cardcheck`, `lock`, `drift`, plus `scan_content` and
+`scan_repo`. Point your MCP client at it with the bundled config:
 
 ```json
 {
@@ -216,7 +247,7 @@ your MCP client at it with the bundled config:
 }
 ```
 
-Claude Code skills for both tools live under [skills/](skills/), and a plugin
+A Claude Code skill for each tool lives under [skills/](skills/), and a plugin
 manifest is in [.claude-plugin/](.claude-plugin/).
 
 ## Contributing

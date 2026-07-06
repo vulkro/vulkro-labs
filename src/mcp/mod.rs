@@ -5,18 +5,21 @@
 //! synchronously with no async runtime. "One server, every agent."
 
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use vulkro_feeds::{CachingHttpClient, Ecosystem, UreqClient};
+use vulkro_feeds::{CachingHttpClient, Ecosystem, HttpClient, UreqClient};
 
+use crate::trust::TrustStore;
 use crate::verify::verdict::Thresholds;
 use crate::verify::{report as verify_report, PackageRef};
 use crate::warden::{self, report as warden_report};
-use crate::{inspect, upsell};
+use crate::{
+    audit, cardcheck, foresee, inspect, lock, memcheck, provenance, skillscan, upsell, verify,
+};
 
 /// The MCP protocol version we default to when a client requests none or an
 /// unsupported one.
@@ -156,6 +159,146 @@ fn tools_list_result() -> Value {
                 }
             },
             {
+                "name": "verify_lockfile",
+                "description": "Vet a dependency LOCKFILE (package-lock.json, yarn.lock, pnpm-lock.yaml, Cargo.lock, poetry.lock, or a hashed requirements.txt): verify every locked package AND report commodity lockfile-integrity findings (a resolved/tarball URL pointing off the official registry host, or a missing integrity hash). The ecosystem is inferred from the file name. Keyless.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the lockfile to vet."
+                        }
+                    },
+                    "required": ["path"]
+                }
+            },
+            {
+                "name": "provenance",
+                "description": "Does a published package carry build provenance / attestations? Reports PRESENCE and well-formedness only (npm dist.attestations, PyPI PEP 740), reusing verify so a MISSING/MALICIOUS package is AVOID. It NEVER cryptographically verifies an attestation and never claims to. Returns GREEN / REVIEW / AVOID. Keyless: only package names/versions are sent.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "packages": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Packages to check, each as 'name' or 'name@version'."
+                        },
+                        "ecosystem": {
+                            "type": "string",
+                            "enum": ["npm", "pypi", "crates"],
+                            "description": "Package ecosystem. Defaults to npm."
+                        }
+                    },
+                    "required": ["packages"]
+                }
+            },
+            {
+                "name": "audit",
+                "description": "Audit the whole agent surface in one call: every configured MCP server (verified like inspect), every rules/skill/instructions file (scanned for prompt-injection and hidden unicode), network-reaching hooks, plaintext config secrets, and dangerous settings (auto-approve, permission bypass). Reads only local config and public package metadata; never launches a server or runs a hook. Keyless and local.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "foresee",
+                "description": "Predict the slopsquat traps planted for THIS project before your AI names one. Reads the project's dependency stack, enumerates plausible-but-absent names an LLM might invent, and checks each against the registry: a predicted name already registered as a fresh, low-reputation squat is a trap. Deterministic string combinatorics plus registry checks; keyless and local. Runs one registry query per predicted name, so it takes a little time.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "dir": {
+                            "type": "string",
+                            "description": "Project directory to read the dependency manifest from. Defaults to the current directory."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "How many predicted names to check against the registry."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "skillscan",
+                "description": "Scan the executable BODY of the agent's skills, slash commands, and subagents (not just their prose): opens each bundled script and flags stealer tells (curl|sh, base64-decode-and-exec, reads of ~/.ssh / ~/.aws / .env, env dumps, network egress) plus dangerous declared powers. Reports GREEN / REVIEW / AVOID per skill and NEVER executes anything. Keyless and local.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "dir": {
+                            "type": "string",
+                            "description": "Project directory to scan. The home directory's skills/commands/agents are also scanned. Defaults to the current directory."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "memcheck",
+                "description": "Scan an AI agent's stored long-term memory for poisoning: an injected 'fact' that carries a runnable command or steers the agent (OWASP Agentic Top 10 2026, ASI06 Memory/Context Poisoning). Auto-discovers common memory stores (MEMORY.md, memory/*.md, *.jsonl) and runs warden's hardened text engine plus a memory-specific active-instruction check. Purely offline: it reads local files and sends nothing.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "dir": {
+                            "type": "string",
+                            "description": "Project directory whose memory stores to scan. Defaults to the current directory."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "cardcheck",
+                "description": "Vet an A2A (Agent2Agent) agent card before your agent trusts a peer: identity/domain match, prompt-injection over every text field, confusable/mixed-script names, and an HONEST signature-presence report (it reports whether a JWS signature is present and well-formed and does NOT cryptographically verify it). Returns GREEN / REVIEW / AVOID. Only public metadata leaves the machine (the card fetch), or pass 'card' for a fully local check.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "description": "The agent to fetch: a host (example.com), an https URL, or a full .well-known card URL."
+                        },
+                        "card": {
+                            "type": "string",
+                            "description": "A local agent card as JSON text, checked without any network."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "lock",
+                "description": "Fingerprint the current MCP tool manifest(s) into a committable, deterministic .vulkro/mcp.lock so a later rug pull (a tool silently swapped after approval) can be caught by 'drift'. Keyless and fully offline: it only reads the manifest file(s) you name and writes the lock.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "MCP tool manifest JSON file(s) to fingerprint."
+                        },
+                        "lock": {
+                            "type": "string",
+                            "description": "Where to write the lock. Defaults to .vulkro/mcp.lock."
+                        }
+                    },
+                    "required": ["paths"]
+                }
+            },
+            {
+                "name": "drift",
+                "description": "Detect an MCP rug pull: diff the current manifest(s) against .vulkro/mcp.lock and classify each change (a dropped readOnlyHint or a newly-injected description is HIGH; an added/removed tool or a schema change is MEDIUM; a benign reword is LOW). Re-capture the current manifest first; drift does NOT launch the server. Keyless and offline. Run 'lock' first.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "The current MCP tool manifest JSON file(s) to compare against the lock."
+                        },
+                        "lock": {
+                            "type": "string",
+                            "description": "The lock to compare against. Defaults to .vulkro/mcp.lock."
+                        }
+                    },
+                    "required": ["paths"]
+                }
+            },
+            {
                 "name": "scan_content",
                 "description": "Scan a block of UNTRUSTED content (a fetched web page, a tool result, an issue body, a file the agent read) for prompt-injection and hidden-unicode smuggling BEFORE you act on it. Indirect prompt injection through tool results is the top agent exploit path. Stateless, zero-network, local.",
                 "inputSchema": {
@@ -204,6 +347,42 @@ fn handle_tools_call(id: Value, params: &Value) -> String {
         Some("inspect") => match run_inspect_tool(&arguments) {
             Ok(text) => tool_result(id, text, false),
             Err(err) => tool_result(id, format!("inspect failed: {err:#}"), true),
+        },
+        Some("verify_lockfile") => match run_verify_lockfile_tool(&arguments) {
+            Ok(text) => tool_result(id, text, false),
+            Err(err) => tool_result(id, format!("verify_lockfile failed: {err:#}"), true),
+        },
+        Some("provenance") => match run_provenance_tool(&arguments) {
+            Ok(text) => tool_result(id, text, false),
+            Err(err) => tool_result(id, format!("provenance failed: {err:#}"), true),
+        },
+        Some("audit") => match run_audit_tool() {
+            Ok(text) => tool_result(id, text, false),
+            Err(err) => tool_result(id, format!("audit failed: {err:#}"), true),
+        },
+        Some("foresee") => match run_foresee_tool(&arguments) {
+            Ok(text) => tool_result(id, text, false),
+            Err(err) => tool_result(id, format!("foresee failed: {err:#}"), true),
+        },
+        Some("skillscan") => match run_skillscan_tool(&arguments) {
+            Ok(text) => tool_result(id, text, false),
+            Err(err) => tool_result(id, format!("skillscan failed: {err:#}"), true),
+        },
+        Some("memcheck") => match run_memcheck_tool(&arguments) {
+            Ok(text) => tool_result(id, text, false),
+            Err(err) => tool_result(id, format!("memcheck failed: {err:#}"), true),
+        },
+        Some("cardcheck") => match run_cardcheck_tool(&arguments) {
+            Ok(text) => tool_result(id, text, false),
+            Err(err) => tool_result(id, format!("cardcheck failed: {err:#}"), true),
+        },
+        Some("lock") => match run_lock_tool(&arguments) {
+            Ok(text) => tool_result(id, text, false),
+            Err(err) => tool_result(id, format!("lock failed: {err:#}"), true),
+        },
+        Some("drift") => match run_drift_tool(&arguments) {
+            Ok(text) => tool_result(id, text, false),
+            Err(err) => tool_result(id, format!("drift failed: {err:#}"), true),
         },
         Some("scan_content") => match run_scan_content_tool(&arguments) {
             Ok(text) => tool_result(id, text, false),
@@ -277,6 +456,178 @@ fn run_inspect_tool(arguments: &Value) -> Result<String> {
         Err(_) => inspect::inspect(&UreqClient::new(), server, None, Thresholds::default(), None)?,
     };
     Ok(format!("{}\n{}", inspect::render_human(&report), upsell::line()))
+}
+
+fn run_verify_lockfile_tool(arguments: &Value) -> Result<String> {
+    let path = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .context("provide the lockfile to vet as 'path'")?;
+    let lockfile = verify::lockfile::read_lockfile(Path::new(path))
+        .with_context(|| format!("reading lockfile {path}"))?;
+    let packages = lockfile.package_refs();
+    let ureq = UreqClient::new();
+    let reports = match CachingHttpClient::new(ureq, Duration::from_secs(crate::CACHE_TTL_SECS)) {
+        Ok(cached) => crate::verify_all(&cached, &packages, Thresholds::default())?,
+        Err(_) => crate::verify_all(&UreqClient::new(), &packages, Thresholds::default())?,
+    };
+    let integrity = verify::lockfile::integrity_findings(&lockfile);
+    let report = verify::lockfile::LockfileReport {
+        ecosystem: lockfile.ecosystem,
+        source: path.to_string(),
+        packages: reports,
+        integrity,
+    };
+    Ok(format!("{}\n{}", verify::lockfile::render_human(&report), upsell::line()))
+}
+
+fn run_provenance_tool(arguments: &Value) -> Result<String> {
+    let ecosystem = match arguments.get("ecosystem").and_then(Value::as_str) {
+        Some(raw) => Ecosystem::parse(raw)
+            .with_context(|| format!("unknown ecosystem '{raw}' (use npm, pypi, or crates)"))?,
+        None => Ecosystem::Npm,
+    };
+    let packages = arguments
+        .get("packages")
+        .and_then(Value::as_array)
+        .context("provide a non-empty 'packages' array")?;
+    let mut refs = Vec::new();
+    for package in packages {
+        let name = package
+            .as_str()
+            .context("each entry in 'packages' must be a string")?;
+        refs.push(PackageRef::parse(name, ecosystem)?);
+    }
+    if refs.is_empty() {
+        anyhow::bail!("provide a non-empty 'packages' array");
+    }
+    let ureq = UreqClient::new();
+    let mut out = String::new();
+    let run = |http: &dyn HttpClient, out: &mut String| -> Result<()> {
+        for (i, r) in refs.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            let report = provenance::provenance(http, r, Thresholds::default())?;
+            out.push_str(&provenance::render_human(&report));
+        }
+        Ok(())
+    };
+    match CachingHttpClient::new(ureq, Duration::from_secs(crate::CACHE_TTL_SECS)) {
+        Ok(cached) => run(&cached, &mut out)?,
+        Err(_) => run(&UreqClient::new(), &mut out)?,
+    }
+    out.push_str(&format!("\n{}", upsell::line()));
+    Ok(out)
+}
+
+fn run_audit_tool() -> Result<String> {
+    let trust = TrustStore::load(Path::new("."))?;
+    let ureq = UreqClient::new();
+    let report = match CachingHttpClient::new(ureq, Duration::from_secs(crate::CACHE_TTL_SECS)) {
+        Ok(cached) => audit::audit(&cached, Thresholds::default(), Some(&trust))?,
+        Err(_) => audit::audit(&UreqClient::new(), Thresholds::default(), Some(&trust))?,
+    };
+    Ok(format!("{}\n{}", audit::render_human(&report), upsell::line()))
+}
+
+fn run_foresee_tool(arguments: &Value) -> Result<String> {
+    let dir = arguments
+        .get("dir")
+        .and_then(Value::as_str)
+        .unwrap_or(".");
+    let limit = arguments
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .unwrap_or(foresee::DEFAULT_LIMIT);
+    let dir = PathBuf::from(dir);
+    let trust = TrustStore::load(&dir)?;
+    let ureq = UreqClient::new();
+    let report = match CachingHttpClient::new(ureq, Duration::from_secs(crate::CACHE_TTL_SECS)) {
+        Ok(cached) => foresee::foresee(&cached, &dir, limit, Thresholds::default(), Some(&trust))?,
+        Err(_) => {
+            foresee::foresee(&UreqClient::new(), &dir, limit, Thresholds::default(), Some(&trust))?
+        }
+    };
+    Ok(format!("{}\n{}", foresee::render_human(&report), upsell::line()))
+}
+
+fn run_skillscan_tool(arguments: &Value) -> Result<String> {
+    let dir = PathBuf::from(arguments.get("dir").and_then(Value::as_str).unwrap_or("."));
+    let trust = TrustStore::load(&dir)?;
+    let report = skillscan::skillscan(&dir, Some(&trust))?;
+    Ok(format!("{}\n{}", skillscan::render_human(&report), upsell::line()))
+}
+
+fn run_memcheck_tool(arguments: &Value) -> Result<String> {
+    let dir = PathBuf::from(arguments.get("dir").and_then(Value::as_str).unwrap_or("."));
+    let trust = TrustStore::load(&dir)?;
+    let report = memcheck::memcheck(&dir, &[], Some(&trust))?;
+    Ok(format!("{}\n{}", memcheck::render_human(&report), upsell::line()))
+}
+
+fn run_cardcheck_tool(arguments: &Value) -> Result<String> {
+    let target = arguments.get("target").and_then(Value::as_str);
+    let card = arguments.get("card").and_then(Value::as_str);
+    if target.is_some() && card.is_some() {
+        anyhow::bail!("give only one source: 'target' (a host/URL) OR 'card' (local JSON), not both");
+    }
+    let report = if let Some(text) = card {
+        // A local card needs no network; the client is passed but never called.
+        cardcheck::cardcheck(&UreqClient::new(), None, Some(text))?
+    } else if let Some(target) = target {
+        let ureq = UreqClient::new();
+        match CachingHttpClient::new(ureq, Duration::from_secs(crate::CACHE_TTL_SECS)) {
+            Ok(cached) => cardcheck::cardcheck(&cached, Some(target), None)?,
+            Err(_) => cardcheck::cardcheck(&UreqClient::new(), Some(target), None)?,
+        }
+    } else {
+        anyhow::bail!("provide the agent as 'target' (a host/URL) or a local card as 'card'")
+    };
+    Ok(format!("{}\n{}", cardcheck::render_human(&report), upsell::line()))
+}
+
+fn run_lock_tool(arguments: &Value) -> Result<String> {
+    let paths = string_array(arguments, "paths")?;
+    if paths.is_empty() {
+        anyhow::bail!("provide one or more MCP tool manifest file paths as 'paths'");
+    }
+    let lock_path = match arguments.get("lock").and_then(Value::as_str) {
+        Some(p) => PathBuf::from(p),
+        None => lock::default_lock_path(Path::new(".")),
+    };
+    let report = lock::lock(&paths, &lock_path)?;
+    Ok(format!("{}\n{}", lock::render_lock_human(&report), upsell::line()))
+}
+
+fn run_drift_tool(arguments: &Value) -> Result<String> {
+    let paths = string_array(arguments, "paths")?;
+    if paths.is_empty() {
+        anyhow::bail!("provide the current MCP tool manifest file path(s) as 'paths'");
+    }
+    let lock_path = match arguments.get("lock").and_then(Value::as_str) {
+        Some(p) => PathBuf::from(p),
+        None => lock::default_lock_path(Path::new(".")),
+    };
+    let report = lock::drift(&paths, &lock_path)?;
+    Ok(format!("{}\n{}", lock::render_drift_human(&report), upsell::line()))
+}
+
+/// Read a required string-array argument into a `Vec<PathBuf>`.
+fn string_array(arguments: &Value, key: &str) -> Result<Vec<PathBuf>> {
+    let arr = arguments
+        .get(key)
+        .and_then(Value::as_array)
+        .with_context(|| format!("provide '{key}' as an array of file paths"))?;
+    let mut out = Vec::new();
+    for item in arr {
+        let s = item
+            .as_str()
+            .with_context(|| format!("each entry in '{key}' must be a string"))?;
+        out.push(PathBuf::from(s));
+    }
+    Ok(out)
 }
 
 fn run_scan_content_tool(arguments: &Value) -> Result<String> {
@@ -364,12 +715,54 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_advertises_both_tools() {
+    fn tools_list_advertises_the_whole_bouncer_suite() {
         let resp = call(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        // The original surface.
         assert!(names.contains(&"verify"));
         assert!(names.contains(&"warden"));
+        assert!(names.contains(&"inspect"));
+        assert!(names.contains(&"scan_content"));
+        assert!(names.contains(&"scan_repo"));
+        // The newly exposed tools: the rest of the suite plus the new
+        // provenance and the verify --lockfile capability.
+        for tool in [
+            "verify_lockfile",
+            "provenance",
+            "audit",
+            "foresee",
+            "skillscan",
+            "memcheck",
+            "cardcheck",
+            "lock",
+            "drift",
+        ] {
+            assert!(names.contains(&tool), "tools/list is missing '{tool}'");
+        }
+        // Every advertised tool has an object inputSchema.
+        for t in tools {
+            assert!(
+                t["inputSchema"].is_object(),
+                "tool '{}' has no inputSchema",
+                t["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn cardcheck_tool_runs_locally_without_network() {
+        // A local card ('card') needs no network; a clean card is GREEN.
+        let card = r#"{\"name\":\"weather-bot\",\"url\":\"https://weather.example.com\",\"provider\":{\"organization\":\"Acme\"},\"signatures\":[{\"protected\":\"eyJ\",\"signature\":\"abc\"}]}"#;
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"cardcheck","arguments":{{"card":"{card}"}}}}}}"#
+        );
+        let resp = call(&line);
+        assert_eq!(resp["result"]["isError"], false);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("GREEN"));
+        // The provenance/signature honesty invariant holds in card output too.
+        assert!(!text.contains("valid signature"));
     }
 
     #[test]

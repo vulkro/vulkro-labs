@@ -97,6 +97,51 @@ pub struct Reputation {
     pub downloads: Option<u64>,
 }
 
+/// Structural presence of a published build-provenance / attestation record for
+/// one package version, read from public registry metadata.
+///
+/// There is deliberately NO `Verified` state: reading this metadata is a
+/// PRESENCE check, not a cryptographic verification, so it can never represent
+/// (and can never claim) a verified attestation. Whether the linked source
+/// repository is well-formed is orthogonal and lives in [`ProvenanceInfo`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestationPresence {
+    /// The registry advertises no provenance / attestation for this version.
+    Absent,
+    /// A provenance / attestation record is present and structurally complete.
+    PresentWellFormed,
+    /// A provenance / attestation record is present but missing expected parts.
+    PresentMalformed,
+}
+
+/// Commodity build-provenance metadata for one package version, read live from
+/// public registry metadata. It records only what the registry advertises: it
+/// performs no cryptographic verification and has no "verified" state.
+#[derive(Debug, Clone)]
+pub struct ProvenanceInfo {
+    /// The version this metadata was read for (the latest, unless pinned).
+    pub version: Option<String>,
+    /// Structural presence of the provenance / attestation record.
+    pub presence: AttestationPresence,
+    /// The kinds of attestation the registry advertises (e.g. `provenance`,
+    /// `publish`), best-effort, for display only.
+    pub kinds: Vec<String>,
+    /// The source repository URL the package metadata links to, if any. Used
+    /// only to note a mismatch as a REVIEW signal, never as a hard fail.
+    pub source_repo: Option<String>,
+}
+
+impl Default for ProvenanceInfo {
+    fn default() -> Self {
+        Self {
+            version: None,
+            presence: AttestationPresence::Absent,
+            kinds: Vec::new(),
+            source_repo: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

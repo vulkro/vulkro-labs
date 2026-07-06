@@ -165,6 +165,29 @@ pub fn results_from_verify(reports: &[PackageReport], manifest: Option<&Path>) -
     out
 }
 
+/// verify --lockfile: the per-package verdicts (located at the lockfile) plus
+/// the commodity `LOCKFILE-INTEGRITY` findings, all under the verify namespace.
+/// Integrity rule ids are `vulkro-live/verify/lockfile-<category>`.
+pub fn results_from_lockfile(
+    report: &crate::verify::lockfile::LockfileReport,
+    lockfile: &Path,
+) -> Vec<SarifResult> {
+    let mut out = results_from_verify(&report.packages, Some(lockfile));
+    let source = lockfile.display().to_string();
+    for f in &report.integrity {
+        out.push(SarifResult {
+            rule_id: format!("vulkro-live/verify/lockfile-{}", f.category),
+            level: level_from_severity(f.severity),
+            message: finding_message(f),
+            loc: Loc {
+                file: Some(source.clone()),
+                logical: f.tool.clone(),
+            },
+        });
+    }
+    out
+}
+
 /// warden: one result per finding, located at the tool name (logical) and the
 /// source file (physical) when the source is a real file.
 pub fn results_from_warden(findings: &[Finding], source: &str) -> Vec<SarifResult> {
@@ -206,6 +229,41 @@ pub fn results_from_inspect(report: &InspectReport) -> Vec<SarifResult> {
             message: finding_message(f),
             loc: Loc::logical(report.spec.clone()),
         });
+    }
+    out
+}
+
+/// provenance: the trust verdict (when flagged) plus every provenance finding,
+/// all located at the package name. Rule ids use the provenance namespace.
+pub fn results_from_provenance(
+    reports: &[crate::provenance::ProvenanceReport],
+) -> Vec<SarifResult> {
+    let mut out = Vec::new();
+    for report in reports {
+        if report.trust.is_flagged() {
+            out.push(SarifResult {
+                rule_id: format!("vulkro-live/provenance/{}", trust_slug(report.trust)),
+                level: level_from_trust(report.trust),
+                message: format!(
+                    "{}: {} provenance",
+                    report.display_name(),
+                    match report.trust {
+                        Trust::Avoid => "avoid",
+                        Trust::Review => "review",
+                        Trust::Green => "green",
+                    }
+                ),
+                loc: Loc::logical(report.display_name()),
+            });
+        }
+        for f in &report.findings {
+            out.push(SarifResult {
+                rule_id: format!("vulkro-live/provenance/{}", f.category),
+                level: level_from_severity(f.severity),
+                message: format!("{}: {}", report.display_name(), finding_message(f)),
+                loc: Loc::logical(report.display_name()),
+            });
+        }
     }
     out
 }

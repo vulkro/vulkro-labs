@@ -6,6 +6,33 @@ project aims to follow Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- `vulkro-live verify --lockfile <file>` - vet a pinned dependency LOCKFILE
+  (package-lock.json, yarn.lock, pnpm-lock.yaml, Cargo.lock, poetry.lock, or a
+  hashed requirements.txt; the ecosystem is inferred from the file name). It
+  verifies every locked package like the manifest mode AND adds commodity
+  `LOCKFILE-INTEGRITY` findings that only a pinned lockfile makes detectable: an
+  `off-registry-resolved` URL that points off the official registry host (a
+  repointed dependency source, HIGH) and a `missing-integrity` entry with no
+  integrity hash where one is normally recorded (MEDIUM). Supports
+  `--format text|json|sarif`.
+- `vulkro-live provenance` - a build-provenance / attestation PRESENCE bouncer
+  for npm and PyPI. It reads what the public registry advertises (npm
+  `dist.attestations` / provenance, PyPI PEP 740 attestations) and reports one
+  GREEN / REVIEW / AVOID verdict per package: provenance present and well-formed
+  or absent is GREEN (absence is common today, only a review signal), malformed
+  provenance or a source-repo mismatch is REVIEW, and a MISSING / MALICIOUS /
+  LOOKALIKE package (reusing verify) is AVOID. It is deliberately honest: it
+  never cryptographically verifies an attestation and never claims to.
+  crates.io exposes no keyless provenance, so a crate is reported as "not
+  available" rather than as a missing attestation. Supports
+  `--format text|json|sarif`, and ships as a Claude Code skill.
+- The built-in MCP server (`vulkro-live mcp`) now exposes the whole free bouncer
+  suite, not just verify and warden: `verify_lockfile`, `provenance`, `inspect`,
+  `audit`, `foresee`, `skillscan`, `memcheck`, `cardcheck`, `lock`, and `drift`
+  are all callable by an agent over the single server.
+
 ## [0.2.1]
 
 ### Fixed

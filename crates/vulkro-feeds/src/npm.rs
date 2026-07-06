@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::ecosystem::{PackageMetadata, Reputation};
+use crate::ecosystem::{AttestationPresence, PackageMetadata, ProvenanceInfo, Reputation};
 use crate::http::HttpClient;
 
 /// Base URL for the public npm registry (existence + metadata).
@@ -111,6 +111,130 @@ impl<'a> Npm<'a> {
             .with_context(|| format!("parsing npm download counts for '{name}'"))?;
         Ok(point.downloads)
     }
+
+    /// Read the published build-provenance / attestation metadata the npm
+    /// registry advertises for a version (the pinned one, else the latest).
+    ///
+    /// This is a commodity PRESENCE read of public metadata: npm's `dist`
+    /// object carries an `attestations` record ({ url, provenance }) and a
+    /// `signatures` array when a package was published with provenance (npm
+    /// `--provenance` / a trusted CI publisher). It performs NO cryptographic
+    /// verification and never claims one. `Ok(None)` when the package does not
+    /// exist.
+    pub fn provenance(&self, name: &str, version: Option<&str>) -> Result<Option<ProvenanceInfo>> {
+        let url = format!("{REGISTRY_BASE}/{}", encode_name(name));
+        let resp = self
+            .http
+            .get(&url)
+            .with_context(|| format!("querying the npm registry for '{name}'"))?;
+        if resp.status == 404 {
+            return Ok(None);
+        }
+        if !resp.is_success() {
+            anyhow::bail!(
+                "the npm registry returned HTTP {} for '{name}' (try again shortly)",
+                resp.status
+            );
+        }
+        let doc: ProvenancePackument = serde_json::from_str(&resp.body)
+            .with_context(|| format!("parsing npm registry metadata for '{name}'"))?;
+
+        // Choose the version to read: the pinned one, else dist-tags.latest.
+        let chosen = version
+            .map(str::to_string)
+            .or_else(|| doc.dist_tags.latest.clone());
+        let version_doc = chosen.as_deref().and_then(|v| doc.versions.get(v));
+
+        let (presence, kinds) = match version_doc.map(|v| &v.dist) {
+            Some(dist) => read_attestations(dist),
+            None => (AttestationPresence::Absent, Vec::new()),
+        };
+        let source_repo = version_doc
+            .and_then(|v| v.repository.as_ref())
+            .and_then(repository_url)
+            .or_else(|| doc.repository.as_ref().and_then(repository_url));
+
+        Ok(Some(ProvenanceInfo {
+            version: chosen,
+            presence,
+            kinds,
+            source_repo,
+        }))
+    }
+}
+
+/// The subset of a packument needed to read provenance for one version.
+#[derive(Deserialize)]
+struct ProvenancePackument {
+    #[serde(rename = "dist-tags", default)]
+    dist_tags: DistTags,
+    #[serde(default)]
+    versions: BTreeMap<String, VersionDoc>,
+    #[serde(default)]
+    repository: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct VersionDoc {
+    #[serde(default)]
+    dist: Dist,
+    #[serde(default)]
+    repository: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Default)]
+struct Dist {
+    #[serde(default)]
+    attestations: Option<Attestations>,
+    #[serde(default)]
+    signatures: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct Attestations {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    provenance: Option<serde_json::Value>,
+}
+
+/// Classify the presence and kinds of a version's `dist` attestation metadata.
+/// An `attestations` object with a URL is well-formed; one missing its URL is
+/// malformed. Registry signatures alone (no attestations) are Absent for
+/// provenance purposes but are noted as a `signature` kind.
+fn read_attestations(dist: &Dist) -> (AttestationPresence, Vec<String>) {
+    let mut kinds = Vec::new();
+    let presence = match &dist.attestations {
+        Some(att) => {
+            if att.provenance.is_some() {
+                kinds.push("provenance".to_string());
+            }
+            if att.url.as_deref().map(str::is_empty).unwrap_or(true) {
+                AttestationPresence::PresentMalformed
+            } else {
+                AttestationPresence::PresentWellFormed
+            }
+        }
+        None => AttestationPresence::Absent,
+    };
+    if !dist.signatures.is_empty() {
+        kinds.push("registry-signature".to_string());
+    }
+    (presence, kinds)
+}
+
+/// The source-repo URL from an npm `repository` field, which may be a string or
+/// an object with a `url`. Read for display and mismatch notes only.
+fn repository_url(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Object(map) => map
+            .get("url")
+            .and_then(|u| u.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        _ => None,
+    }
 }
 
 /// Percent-encode a package name for a URL path. A scoped name carries a `/`
@@ -198,5 +322,56 @@ mod tests {
             r#"{"error":"package new-thing not found"}"#,
         );
         assert_eq!(Npm::new(&http).weekly_downloads("new-thing").unwrap(), None);
+    }
+
+    #[test]
+    fn provenance_present_reads_attestations_and_repo() {
+        let body = r#"{
+            "dist-tags": {"latest": "2.0.0"},
+            "repository": {"type": "git", "url": "git+https://github.com/acme/pkg.git"},
+            "versions": {
+                "2.0.0": {
+                    "dist": {
+                        "attestations": {"url": "https://registry.npmjs.org/-/npm/v1/attestations/pkg@2.0.0", "provenance": {"predicateType": "https://slsa.dev/provenance/v1"}},
+                        "signatures": [{"keyid": "x", "sig": "y"}]
+                    }
+                }
+            }
+        }"#;
+        let http = MockHttp::new().on_get("registry.npmjs.org/pkg", 200, body);
+        let info = Npm::new(&http).provenance("pkg", None).unwrap().unwrap();
+        assert_eq!(info.presence, AttestationPresence::PresentWellFormed);
+        assert_eq!(info.version.as_deref(), Some("2.0.0"));
+        assert!(info.kinds.iter().any(|k| k == "provenance"));
+        assert_eq!(info.source_repo.as_deref(), Some("git+https://github.com/acme/pkg.git"));
+    }
+
+    #[test]
+    fn provenance_absent_when_no_attestations() {
+        let body = r#"{
+            "dist-tags": {"latest": "1.0.0"},
+            "versions": {"1.0.0": {"dist": {}}}
+        }"#;
+        let http = MockHttp::new().on_get("registry.npmjs.org/plain", 200, body);
+        let info = Npm::new(&http).provenance("plain", None).unwrap().unwrap();
+        assert_eq!(info.presence, AttestationPresence::Absent);
+        assert!(info.kinds.is_empty());
+    }
+
+    #[test]
+    fn provenance_malformed_when_url_missing() {
+        let body = r#"{
+            "dist-tags": {"latest": "1.0.0"},
+            "versions": {"1.0.0": {"dist": {"attestations": {"provenance": {"x": 1}}}}}
+        }"#;
+        let http = MockHttp::new().on_get("registry.npmjs.org/broken", 200, body);
+        let info = Npm::new(&http).provenance("broken", None).unwrap().unwrap();
+        assert_eq!(info.presence, AttestationPresence::PresentMalformed);
+    }
+
+    #[test]
+    fn provenance_missing_package_is_none() {
+        let http = MockHttp::new().on_get("registry.npmjs.org", 404, r#"{"error":"Not found"}"#);
+        assert!(Npm::new(&http).provenance("ghost-xyz", None).unwrap().is_none());
     }
 }
