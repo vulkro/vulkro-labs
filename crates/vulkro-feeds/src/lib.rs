@@ -23,7 +23,9 @@ pub mod pypi;
 pub mod registry;
 
 pub use crates_io::CratesIo;
-pub use ecosystem::{Ecosystem, PackageMetadata, Reputation};
+pub use ecosystem::{
+    AttestationPresence, Ecosystem, PackageMetadata, ProvenanceInfo, Reputation,
+};
 pub use http::{CachingHttpClient, HttpClient, HttpResponse};
 pub use mcp_manifest::{parse_tools, McpTool};
 pub use npm::Npm;

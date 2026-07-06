@@ -8,7 +8,7 @@
 use anyhow::Result;
 
 use crate::crates_io::CratesIo;
-use crate::ecosystem::{Ecosystem, PackageMetadata, Reputation};
+use crate::ecosystem::{Ecosystem, PackageMetadata, ProvenanceInfo, Reputation};
 use crate::http::HttpClient;
 use crate::npm::Npm;
 use crate::pypi::PyPi;
@@ -35,4 +35,36 @@ pub fn reputation(http: &dyn HttpClient, ecosystem: Ecosystem, name: &str) -> Re
         Ecosystem::PyPI => PyPi::new(http).reputation(name),
         Ecosystem::Crates => CratesIo::new(http).reputation(name),
     }
+}
+
+/// Published build-provenance / attestation PRESENCE for `name` (optionally at
+/// `version`) in `ecosystem`. `Ok(None)` when the package does not exist.
+///
+/// This is a commodity presence read of public registry metadata, never a
+/// cryptographic verification. crates.io does not advertise per-version
+/// provenance keyless, so it reports no attestation rather than querying.
+pub fn provenance(
+    http: &dyn HttpClient,
+    ecosystem: Ecosystem,
+    name: &str,
+    version: Option<&str>,
+) -> Result<Option<ProvenanceInfo>> {
+    match ecosystem {
+        Ecosystem::Npm => Npm::new(http).provenance(name, version),
+        Ecosystem::PyPI => PyPi::new(http).provenance(name, version),
+        // crates.io publishes no keyless per-version provenance metadata; report
+        // "not supported" via an existence-checked Absent so the tool can say so
+        // honestly rather than implying the crate lacks provenance.
+        Ecosystem::Crates => Ok(CratesIo::new(http).lookup(name)?.map(|meta| ProvenanceInfo {
+            version: version.map(str::to_string).or(meta.latest_version),
+            ..ProvenanceInfo::default()
+        })),
+    }
+}
+
+/// Whether an ecosystem exposes keyless per-version provenance / attestation
+/// metadata at all. crates.io does not, so a missing attestation there is "not
+/// available", not a signal.
+pub fn provenance_supported(ecosystem: Ecosystem) -> bool {
+    matches!(ecosystem, Ecosystem::Npm | Ecosystem::PyPI)
 }

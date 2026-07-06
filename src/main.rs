@@ -24,6 +24,7 @@ mod inspect;
 mod lock;
 mod mcp;
 mod memcheck;
+mod provenance;
 mod sarif;
 mod skillscan;
 mod trust;
@@ -59,6 +60,16 @@ with --manifest) verify reports one verdict:
 Ecosystems: npm (default), pypi, crates. Use --ecosystem for positional
 packages; --manifest infers the ecosystem from the file name (package.json,
 requirements.txt, pyproject.toml, Cargo.toml).
+
+--lockfile <file> vets a dependency LOCKFILE instead (package-lock.json,
+yarn.lock, pnpm-lock.yaml, Cargo.lock, poetry.lock, or a hashed
+requirements.txt). It verifies every locked package AND adds commodity
+LOCKFILE-INTEGRITY findings that only a pinned lockfile makes detectable:
+
+  off-registry-resolved  a resolved / tarball URL points off the official
+                         registry host (the dependency-repoint class)
+  missing-integrity      a locked version has no integrity hash where one is
+                         normally recorded
 
 It is keyless and local: no account, no API key, no backend. Only package
 names leave your machine; your source code never does.
@@ -269,6 +280,37 @@ future addition.
 Only public metadata leaves your machine (the card fetch); with --file / stdin
 nothing leaves at all. Keyless. Exit codes: 0 GREEN, 1 REVIEW/AVOID, 2 error.";
 
+const PROVENANCE_LONG_ABOUT: &str = "\
+Does this package carry published build provenance? provenance is a
+presence bouncer for build-provenance / attestations.
+
+For each package (given as 'name', 'name@version', or read from a manifest with
+--manifest) it reads what the public registry advertises:
+
+  npm    the packument's dist.attestations / provenance signal
+  PyPI   PEP 740 attestation presence on the release files
+  crates crates.io exposes no keyless provenance, so it is reported as
+         'not available' (never as a missing attestation)
+
+It reports one verdict per package:
+
+  GREEN   real package; provenance present and well-formed, or absent (which is
+          common today and only a review signal)
+  REVIEW  provenance present but malformed, or a linked source repo that does
+          not obviously match the package
+  AVOID   the package is MISSING, MALICIOUS, or a LOOKALIKE (from verify)
+
+provenance is deliberately HONEST: it reports whether provenance is PRESENT and
+well-formed and NEVER cryptographically verifies an attestation or claims to.
+Full attestation verification needs a trust root and is out of scope for a free
+commodity tool.
+
+Keyless and local: only package names / versions leave your machine. Data
+sources are the npm registry (registry.npmjs.org), the PyPI JSON API (pypi.org),
+the crates.io index (crates.io), and OSV.dev (osv.dev) for the reused verify
+checks. Exit codes: 0 when every package is GREEN, 1 when one or more are
+REVIEW/AVOID, 2 on an error.";
+
 #[derive(Parser)]
 #[command(
     name = "vulkro-live",
@@ -329,7 +371,11 @@ enum Command {
     #[command(long_about = CARDCHECK_LONG_ABOUT)]
     Cardcheck(CardcheckArgs),
 
-    /// Run the MCP server exposing verify and warden over stdio.
+    /// Does this package carry published build provenance? Presence only, never verified.
+    #[command(long_about = PROVENANCE_LONG_ABOUT)]
+    Provenance(ProvenanceArgs),
+
+    /// Run the MCP server exposing the free bouncer suite over stdio.
     Mcp,
 }
 
@@ -347,6 +393,14 @@ struct VerifyArgs {
     /// pyproject.toml, or Cargo.toml); the ecosystem is inferred from the name.
     #[arg(long, value_name = "FILE")]
     manifest: Option<PathBuf>,
+
+    /// Vet a dependency LOCKFILE (package-lock.json, yarn.lock, pnpm-lock.yaml,
+    /// Cargo.lock, poetry.lock, or a hashed requirements.txt): verify every
+    /// locked package AND emit lockfile-integrity findings (an off-registry
+    /// resolved URL, a missing integrity hash). The ecosystem is inferred from
+    /// the file name.
+    #[arg(long, value_name = "FILE")]
+    lockfile: Option<PathBuf>,
 
     /// Flag packages created within this many days as SUSPICIOUS (default 30).
     #[arg(long, value_name = "DAYS")]
@@ -519,6 +573,30 @@ struct CardcheckArgs {
 }
 
 #[derive(Args)]
+struct ProvenanceArgs {
+    /// Packages to check, each as `name` or `name@version`.
+    #[arg(value_name = "PACKAGE")]
+    packages: Vec<String>,
+
+    /// Ecosystem for the positional packages: npm (default), pypi, or crates.
+    #[arg(long, value_name = "ECOSYSTEM")]
+    ecosystem: Option<String>,
+
+    /// Read package names from a manifest (package.json, requirements.txt,
+    /// pyproject.toml, or Cargo.toml); the ecosystem is inferred from the name.
+    #[arg(long, value_name = "FILE")]
+    manifest: Option<PathBuf>,
+
+    /// Bypass the local response cache and always query live.
+    #[arg(long)]
+    no_cache: bool,
+
+    /// Output format: text (default), json, or sarif (for CI code-scanning).
+    #[arg(long, value_enum, value_name = "FORMAT", default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(Args)]
 struct LockArgs {
     /// MCP tool manifest JSON file(s) to fingerprint (a tools/list result,
     /// array, or single tool).
@@ -569,6 +647,7 @@ fn run() -> Result<ExitCode> {
         Command::Lock(args) => run_lock(args),
         Command::Drift(args) => run_drift(args),
         Command::Cardcheck(args) => run_cardcheck(args),
+        Command::Provenance(args) => run_provenance(args),
         Command::Mcp => {
             mcp::serve()?;
             Ok(ExitCode::SUCCESS)
@@ -577,6 +656,18 @@ fn run() -> Result<ExitCode> {
 }
 
 fn run_verify(args: VerifyArgs) -> Result<ExitCode> {
+    // --lockfile is a distinct mode: vet a pinned lockfile (verify every locked
+    // package plus lockfile-integrity findings), so it does not combine with
+    // positional packages or --manifest.
+    if let Some(path) = args.lockfile.clone() {
+        if !args.packages.is_empty() || args.manifest.is_some() {
+            anyhow::bail!(
+                "--lockfile is used on its own: do not also pass packages or --manifest"
+            );
+        }
+        return run_verify_lockfile(args, &path);
+    }
+
     let positional_eco = match &args.ecosystem {
         Some(raw) => Ecosystem::parse(raw)
             .with_context(|| format!("unknown ecosystem '{raw}' (use npm, pypi, or crates)"))?,
@@ -638,6 +729,61 @@ fn run_verify(args: VerifyArgs) -> Result<ExitCode> {
 
     let flagged = reports.iter().any(|r| r.verdict.is_flagged());
     Ok(exit_code(flagged))
+}
+
+/// Vet a dependency lockfile: parse it, verify every distinct locked package,
+/// and add commodity lockfile-integrity findings.
+fn run_verify_lockfile(args: VerifyArgs, path: &Path) -> Result<ExitCode> {
+    let lockfile = verify::lockfile::read_lockfile(path)
+        .with_context(|| format!("reading lockfile {}", path.display()))?;
+
+    let mut thresholds = Thresholds::default();
+    if let Some(days) = args.min_age_days {
+        thresholds.min_age_days = days;
+    }
+    if let Some(downloads) = args.min_downloads {
+        thresholds.min_downloads = downloads;
+    }
+
+    let packages = lockfile.package_refs();
+    let ureq = UreqClient::new();
+    let mut reports = if args.no_cache {
+        verify_all(&ureq, &packages, thresholds)?
+    } else {
+        let cached = CachingHttpClient::new(ureq, Duration::from_secs(CACHE_TTL_SECS))?;
+        verify_all(&cached, &packages, thresholds)?
+    };
+
+    // Fold in any local trust clears, exactly like the manifest / package path.
+    let trust = TrustStore::load(Path::new("."))?;
+    for report in &mut reports {
+        verify::apply_package_trust(report, &trust);
+    }
+
+    let integrity = verify::lockfile::integrity_findings(&lockfile);
+    let report = verify::lockfile::LockfileReport {
+        ecosystem: lockfile.ecosystem,
+        source: path.display().to_string(),
+        packages: reports,
+        integrity,
+    };
+
+    match resolve_format(args.format, args.json)? {
+        OutputFormat::Text => {
+            print!("{}", verify::lockfile::render_human(&report));
+            println!("\n{}", upsell::section());
+        }
+        OutputFormat::Json => println!(
+            "{}",
+            sarif::render_json(&sarif::results_from_lockfile(&report, path))?
+        ),
+        OutputFormat::Sarif => println!(
+            "{}",
+            sarif::render(sarif::results_from_lockfile(&report, path))?
+        ),
+    }
+
+    Ok(exit_code(report.is_flagged()))
 }
 
 fn verify_all(
@@ -960,6 +1106,75 @@ fn run_cardcheck(args: CardcheckArgs) -> Result<ExitCode> {
     print!("{}", cardcheck::render_human(&report));
     println!("\n{}", upsell::section());
     Ok(exit_code(report.is_flagged()))
+}
+
+fn run_provenance(args: ProvenanceArgs) -> Result<ExitCode> {
+    let positional_eco = match &args.ecosystem {
+        Some(raw) => Ecosystem::parse(raw)
+            .with_context(|| format!("unknown ecosystem '{raw}' (use npm, pypi, or crates)"))?,
+        None => Ecosystem::Npm,
+    };
+
+    let mut packages: Vec<PackageRef> = Vec::new();
+    for input in &args.packages {
+        packages.push(PackageRef::parse(input, positional_eco)?);
+    }
+    if let Some(path) = &args.manifest {
+        let (eco, names) = manifest::read_manifest(path)
+            .with_context(|| format!("reading manifest {}", path.display()))?;
+        packages.extend(names.into_iter().map(|name| PackageRef {
+            ecosystem: eco,
+            name,
+            version: None,
+        }));
+    }
+    if packages.is_empty() {
+        anyhow::bail!(
+            "no packages to check: pass one or more package names, or --manifest <file>"
+        );
+    }
+
+    let ureq = UreqClient::new();
+    let reports = if args.no_cache {
+        provenance_all(&ureq, &packages)?
+    } else {
+        let cached = CachingHttpClient::new(ureq, Duration::from_secs(CACHE_TTL_SECS))?;
+        provenance_all(&cached, &packages)?
+    };
+
+    match args.format {
+        OutputFormat::Text => {
+            for (i, report) in reports.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                }
+                print!("{}", provenance::render_human(report));
+            }
+            println!("\n{}", upsell::section());
+        }
+        OutputFormat::Json => println!(
+            "{}",
+            sarif::render_json(&sarif::results_from_provenance(&reports))?
+        ),
+        OutputFormat::Sarif => println!(
+            "{}",
+            sarif::render(sarif::results_from_provenance(&reports))?
+        ),
+    }
+
+    let flagged = reports.iter().any(|r| r.is_flagged());
+    Ok(exit_code(flagged))
+}
+
+fn provenance_all(
+    http: &dyn HttpClient,
+    packages: &[PackageRef],
+) -> Result<Vec<provenance::ProvenanceReport>> {
+    let mut reports = Vec::with_capacity(packages.len());
+    for package in packages {
+        reports.push(provenance::provenance(http, package, Thresholds::default())?);
+    }
+    Ok(reports)
 }
 
 fn run_lock(args: LockArgs) -> Result<ExitCode> {

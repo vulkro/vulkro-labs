@@ -6,6 +6,7 @@
 //! ecosystem-dispatched through `vulkro_feeds::registry`, so this policy code
 //! never branches per ecosystem.
 
+pub mod lockfile;
 pub mod lookalike;
 pub mod manifest;
 pub mod report;

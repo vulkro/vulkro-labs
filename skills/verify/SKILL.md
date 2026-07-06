@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Check that packages an AI agent suggested are real (not hallucinated or slopsquatted), not known-malicious, and not suspiciously new or low-reputation, before installing them. Use before adding or installing an npm, PyPI, or crates.io dependency, or to vet all dependencies in a package.json, requirements.txt, pyproject.toml, or Cargo.toml.
+description: Check that packages an AI agent suggested are real (not hallucinated or slopsquatted), not known-malicious, and not suspiciously new or low-reputation, before installing them. Use before adding or installing an npm, PyPI, or crates.io dependency, or to vet all dependencies in a package.json, requirements.txt, pyproject.toml, or Cargo.toml. Pass --lockfile to vet a pinned dependency lockfile (package-lock.json, yarn.lock, pnpm-lock.yaml, Cargo.lock, poetry.lock, or a hashed requirements.txt), which additionally flags an off-registry resolved URL and a missing integrity hash.
 ---
 
 # verify - the AI package bouncer
@@ -37,6 +37,25 @@ package.json, requirements.txt, pyproject.toml, Cargo.toml):
 ```
 vulkro-live verify --manifest ./package.json
 ```
+
+Vet a pinned lockfile (the ecosystem is inferred from the file name:
+package-lock.json, yarn.lock, pnpm-lock.yaml, Cargo.lock, poetry.lock, or a
+hashed requirements.txt). This verifies every locked package AND adds
+lockfile-integrity findings a plain manifest cannot show:
+
+```
+vulkro-live verify --lockfile ./package-lock.json
+vulkro-live verify --lockfile ./Cargo.lock --format sarif
+```
+
+The extra `LOCKFILE-INTEGRITY` findings are:
+
+- `off-registry-resolved` (HIGH) - a resolved / tarball URL points off the
+  official registry host (a repointed dependency source).
+- `missing-integrity` (MEDIUM) - a locked version has no integrity hash where
+  one is normally recorded.
+
+Use `--lockfile` on its own (not with positional packages or `--manifest`).
 
 Machine-readable output for further processing:
 
