@@ -6,6 +6,8 @@ project aims to follow Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-07
+
 ### Added
 
 - `vulkro-live verify --lockfile <file>` - vet a pinned dependency LOCKFILE
