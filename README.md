@@ -2,11 +2,11 @@
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Free, open-source developer security tools from [Vulkro](https://vulkro.com).
+Free developer security tools from [Vulkro](https://vulkro.com).
 Catch supply-chain problems while you build, before you deploy.
 
-> Our free tools are open source. The Vulkro detection engine is a separate,
-> closed product. Only the tools in this repository are open.
+> Vulkro Labs tools are free to use. The Vulkro detection engine is a
+> separate, closed product and is not part of this repository.
 
 `vulkro-live` is a single, keyless command-line binary. It runs entirely on
 your machine, needs no account and no API key, and sends only public metadata
